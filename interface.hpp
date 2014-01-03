@@ -1,7 +1,9 @@
 //////////////////
 //
-//This liblary only support the SSL Protocol Version 3.0 descrived in
-//RFC 6101.
+//This is ssl/websocket io stack libraly for non-blocking io.
+//
+//Only the SSL Protocol Version 3.0 descrived in RFC 6101 was supported.
+//Web socket version is RFC 6455.
 
 
 
@@ -74,34 +76,38 @@ class io_stack{
 
 class io_layer{
     public:
-    //request_read_operation
-    void 
-    async_read(
-            void* data,
-            size_t size, 
-            void(*on_compleate)(void* user_data));
 
-    //request_write_operation
-    void 
-    async_write(
-            void* data,
-            size_t size, 
-            void(*on_compleate)(void* user_data));
+    void connect();
+    void accept();
+
+//basic io.
+    size_t read(
+            void* output_buffer,
+            size_t buffer_size);
+    size_t write(
+            void* output_buffer,
+            size_t buffer_size);
+
+////////////////
+//Event chain (Called from base io.)
+    void try_base_read();
+    void try_base_write();
+
+    void base_io_error();
+    void base_io_closed();
 };
 
-class non_blocking_io_core{
+class core_io{
 public:
     ssize_t read(void* out, size_t size);
     ssize_t write(void* out, size_t size);
+
 };
 
-class non_blocking_io_core:public io_layer{
-    buffer read_buffer;
-    buffer write_buffer;
+class Core_io_layer:public io_layer{
 
-    request active_read_request;
-    request active_write_request;
-
+    void trigger_read();
+    void trigger_write();
 };
 
 class ssl_layer:public io_layer{
