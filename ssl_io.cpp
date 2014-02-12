@@ -2,6 +2,15 @@
 
 namespace ssl{
 
+Record_io_layer::Record_io_layer(){
+	work_buffer.init(initial_buffer_size);
+	
+	state == State::read_header;
+}
+Record_io_layer::~Record_io_layer(){
+	work_buffer.deinit();
+}
+
 void Record_io_layer::internal_error(const char* err_message){
 	printf("internal_err: %s\n", err_message);
 }
@@ -15,12 +24,12 @@ bool load_to_buffer(
 		rcp::buffer<>* buffer,
 		size_t size){
     size_t data_size = buffer->data_size();
-    if (size >= data_size) return true;
+    if (size <= data_size) return true;
     size_t required_size = size - data_size;
     size_t space_size = buffer->space_size();
-    if (required_size < space_size){
+    if (required_size > space_size){
         //todo: expand buffer
-        printf("Not enough buffer\n");
+        printf("Not enough buffer(request = %i)\n",(int) size);
         return false;
     }
     
@@ -33,11 +42,15 @@ bool load_to_buffer(
         if (result == 0) return false;
         required_size -= result;
         read_size += result;
+		buffer->supplied(result);
     }
 
     return true;
 }
 
+void Record_io_layer::set_state(State new_state){
+	this->state = new_state;
+}
 ///////
 //Read data until buffer has specified data size
 bool Record_io_layer::load(size_t s){
@@ -47,62 +60,36 @@ bool Record_io_layer::load(size_t s){
 	return load_to_buffer(f, &work_buffer, s);
 }
 
-/////
-//Read, decompless, decrypt and put data into wark_buffer until specified
-//data size.
-/*
-bool Record_io_layer::load_decoded(rcp_buffer* buffer, size_t size){
-    size_t data_size = rcp_buffer_data_size(buffer);
-    if (data_size >= size) return true;
-    
-    size_t request_size = size - data_size;
-    size_t space_size = rcp_buffer_space_size(buffer);
-    if (space_size > request_size){
-        //todo: abort or expand buffer
-    }
-
-    size_t r_val = low_level_io->read(
-        rcp_buffer_space(buffer),
-        size-data_size
-        )
-
-    data_size = rcp_buffer_data_size(buffer);
-    if (data_size >= size) return true;
-    else return false;
-}
-*/
-
 size_t Record_io_layer::read_record(Content_type type, void* d, size_t s){
-	if (state == State::read_header){
-		bool compleate = read_record_header();
-		if (not compleate) return 0;
-	}
-	if (state == State::read_fragment){
-		if (record_header.content_type != type) return 0;
-		//memo: decode and decrypto
-		size_t consume_size = s;
-		size_t data_size = work_buffer.data_size();
-		if (consume_size < data_size){
-			work_buffer.consume(d, s);
-			return s;
+	printf("read_rec\n");
+	size_t total_result = 0;
+
+	while(1){
+		if (state == State::read_header){
+			bool compleate = read_record_header();
+			if (not compleate) return total_result;
 		}
-		else{
-			work_buffer.consume(d, data_size);
-			work_buffer.cleanup();
-			return data_size;
+		if (state == State::read_fragment){
+			if (record_header.content_type != type) return 0;
+			size_t result = 
+				read_record_fragment(
+						(void*)((uint8_t*)d+total_result), s-total_result);
+			if (result==0) return total_result;
+			total_result+=result;
 		}
 	}
-	internal_error("state corrupted");
-	return 0;	
+	//internal_error("state corrupted");
+	//return 0;	
 }
 
 bool Record_io_layer::read_record_header(){
+	printf("read rec head\n");
     if (state != State::read_header)
         internal_error("state corrupted");
     bool compleate_load = load(5);
     if (not compleate_load) return false;
 	
-	uint8_t raw_bytes[5];
+	uint8_t *raw_bytes = work_buffer.data();
 	record_header.content_type = (Content_type)raw_bytes[0];
 	record_header.major_version = raw_bytes[1];
 	record_header.minor_version = raw_bytes[2];
@@ -110,8 +97,21 @@ bool Record_io_layer::read_record_header(){
 
 	work_buffer.consumed(5);
 	work_buffer.cleanup();
-	printf("header received\n");
+	remain_fragment_size = record_header.length;
+	set_state(State::read_fragment);
+	printf("header received (t = %i)\n", (int)record_header.content_type);
 	return true;
+}
+
+size_t Record_io_layer::read_record_fragment(void* d, size_t s){
+	size_t supply_size = s;
+	if (remain_fragment_size <= supply_size)
+		supply_size = remain_fragment_size;
+	size_t result = low_level_io->read(d, supply_size);
+	remain_fragment_size -= supply_size;
+	if (remain_fragment_size == 0)
+		set_state(State::read_header);
+	return result;
 }
 
 size_t Record_io_layer::write_record(Content_type type, void* d, size_t s){
@@ -138,43 +138,6 @@ size_t Record_io_layer::write_record(Content_type type, void* d, size_t s){
     
 	return s;
 }
-/*
-void Ssl_layer::read_and_process_record_fragment(){
-    if (read_header.content_type == change_cipher_spec){
-
-    }
-    else if (read_header.content_type == alert){
-
-    }
-    else if (read_header.content_type == handshake){
-
-    }
-    else if (read_header.content_type == application_data){
-        //Application data are proccessed in "read" method.
-    }
-    else{
-        //Bad content type.
-        //memo: There is no description abuot how to handle bad 
-        //content type.
-    }
-}
-*/
-/*
-void Ssl_layer::read_record_fragment(){
-    if (record_state != XXX_reading_fragment)
-        err();
-
-    record_state = XXX_processing;
-}
-
-void Ssl_layer::process_non_app_data_frame(){
-
-}
-
-void Ssl_layer::connect(){
-
-}
-*/
 
 /////////////////////////////////
 //Record event
@@ -218,6 +181,14 @@ bool Record_event_layer::is_connected(){
 //////////////////////////////////
 //Handshake
 //////////////////
+
+Handshake_layer::Handshake_layer(){
+	work_buffer.init(initial_buffer_size);
+}
+Handshake_layer::~Handshake_layer(){
+	work_buffer.deinit();
+}
+
 void Handshake_layer::set_state(State state, Sub_state sub_state){
 	this->state = state;
 	this->sub_state = sub_state;
@@ -238,6 +209,15 @@ void Handshake_layer::proceed(){
 			if (sub_state == Sub_state::write_client_hello){
 				write_client_hello();
 			}
+			else if (sub_state == Sub_state::read_server_hello){
+				process_server_hello();
+			}
+			else if (sub_state == Sub_state::read_certificate){
+				process_certificate();
+			}
+			else if (sub_state == Sub_state::read_server_hello_done){
+				process_server_hello_done();
+			}
 		}
 	}
 }
@@ -256,6 +236,7 @@ size_t Handshake_layer::write_content(void* d, size_t s){
 //Return true when the work_buffer has more than data specified 
 //in 1st argument.
 bool Handshake_layer::load(size_t s){
+	printf("handshake load\n");
 	auto f = [&](void* b, size_t s) -> size_t {
 		return read_record(Content_type::handshake, b, s);
 	};
@@ -270,7 +251,7 @@ bool Handshake_layer::read_handshake_header(){
     uint8_t *in = work_buffer.consumed(4);
     header.msg_type = (Handshake_type)in[0];
     header.length = in[1]<<16|in[2]<<8|in[3];
-
+	printf("handshake_header[%i]\n",(int)header.msg_type);
 	set_state(State::read_body, sub_state);
     return true;
 }
@@ -289,90 +270,6 @@ void Handshake_layer::start_server_handshake(){
 	set_state(State::process, Sub_state::read_client_hello);
 	proceed();
 }
-
-//process loaded client hello message
-void Handshake_layer::process_client_hello(){
-    if (state != State::process)
-        internal_error("State corrubted");
-    uint8_t* input_begin = work_buffer.data();
-    uint8_t* input_ptr = input_begin;
-    uint8_t* input_end = 
-        input_begin + work_buffer.data_size();
-    
-    ///////////////////////////////////
-    //version and random
-    if (input_end < input_ptr + 2/*version*/ + 32/*random*/){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-
-    uint8_t major_client_version = input_ptr[0];
-    uint8_t minor_client_version = input_ptr[1];
-    if (not (major_client_version == 3 && minor_client_version == 3)){
-        alert(Alert_messages::protocol_version, true);
-        return;
-    }
-
-    input_ptr += 2;
-    //todo: read_random_here
-    
-    input_ptr += 32;
-
-    ////////////////////////////////////
-    //session_id
-    if (input_end < input_ptr + 1/*sessino_id_length*/){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    uint8_t session_id_length = input_ptr[0];
-    input_ptr += 1;
-
-    if (input_end < input_ptr + session_id_length){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    input_ptr += session_id_length;
-    //todo: read session_id here 
-
-
-    ////////////////////////////////////
-    //session_id
-    if (input_end < input_ptr + 2/*cipher_suite_length*/){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    uint16_t cipher_suites_length = input_ptr[0]<<8 | input_ptr[1];
-    input_ptr += 2;
-
-    if (input_end < input_ptr + cipher_suites_length){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    //todo: read cipher_suites here 
-    input_ptr += cipher_suites_length;
-
-    ////////////////////////////////////
-    //compression_method
-    if (input_end < input_ptr + 1/*complession_method_length*/){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    uint8_t complession_method_length = input_ptr[0];
-    input_ptr += 1;
-
-    if (input_end < input_ptr + complession_method_length){
-        alert(Alert_messages::unexpected_message, true);
-        return;
-    }
-    //todo: read compression_method here 
-    input_ptr += complession_method_length;
-
-    //////////////////////////////
-    //send server hello here
-    
-    printf("client hello received\n");
-}
-
 
 void Handshake_layer::start_client_handshake(){
 	set_state(State::process, Sub_state::write_client_hello);
@@ -404,7 +301,8 @@ bool Handshake_layer::write_client_hello(){
 
         0x00,                         //session_id(length=0)
         0x00, 0x02,                   //cipher_suites_length
-        0x00, 0x6B,                   //cipher_suites
+        0x00, 0x3D,                   //cipher_suites
+        //0x00, 0x6B,                   //cipher_suites
                                       //TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
         0x01, 0x00,                   //compression_method(length=0)
     };
@@ -418,6 +316,7 @@ bool Handshake_layer::write_client_hello(){
         0x06, 0x59, 0x6c, 0x21,  0x8f, 0x0e, 0xaf, 0x32, 
         0xea, 0x5b, 0x0b, 0xf5,  0xd1, 0x11, 0x52, 0x95, 
     };
+	memcpy(random_bytes, bad_random, 32);
     //overwrite UNIX time
     uint32_t base_time = hton32(time(NULL));
     *(uint32_t*)random_bytes = base_time;
@@ -425,12 +324,117 @@ bool Handshake_layer::write_client_hello(){
     size_t result = 
 		write_content(client_hello_template, sizeof client_hello_template);
 	if (result != 0){
-		set_state(State::read_header, Sub_state::read_client_hello);
+		set_state(State::read_header, Sub_state::read_server_hello);
 		return true;
 	}
 	else{
 		return false;
 	}
+}
+
+void Handshake_layer::process_server_hello(){
+    printf("server hello processing\n");
+    if (state != State::process)
+        internal_error("State corrubted");
+	if (header.msg_type != Handshake_type::server_hello)
+		internal_error("unexpected handshake type.");
+
+	rcp::buffer_reader<uint8_t> reader(&work_buffer);
+
+	//Protocol version
+    uint8_t major_version = reader.take<uint8_t>(0);
+    uint8_t minor_version = reader.take<uint8_t>(0);
+	
+	//Random
+	for (int i= 0; i<32; i++)
+		reader.skip<uint8_t>();
+
+    //Session_id
+	uint8_t session_id_length = reader.take<uint8_t>(0);
+	for (int i= 0; i<session_id_length; i++)
+		reader.skip<uint8_t>();
+
+    //cipher_suite and complession method
+	uint16_t cipher_suite = ntoh16(reader.take<uint16_t>(0));
+	uint8_t compression_method = reader.take<uint8_t>(0);
+
+	//memo: extension here(need to read and send alert if required.)
+
+	if (reader.is_failed()){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+
+    if (not (major_version == 3 && minor_version == 3)){
+        alert(Alert_messages::protocol_version, true);
+        return;
+    }
+
+    printf("server hello received\n");
+	work_buffer.consumed_all();
+	work_buffer.cleanup();
+	set_state(State::read_header, Sub_state::read_certificate);
+}
+
+void Handshake_layer::process_certificate(){
+    printf("server hello processing\n");
+    if (state != State::process)
+        internal_error("State corrubted");
+	if (header.msg_type != Handshake_type::certificate)
+		internal_error("unexpected handshake type.");
+
+	rcp::buffer_reader<uint8_t> reader(&work_buffer);
+
+	//Protocol version
+    uint32_t total_length = reader.take_24nash(0);
+	uint32_t remain = total_length;
+
+	while (remain != 0){
+		uint32_t length = reader.take_24nash(0);
+		if (length == 0){
+			alert(Alert_messages::unexpected_message, true);
+			return;
+		}
+		void* certificate = reader.take_byte_pointer<void>(length);
+		remain -= length + 3;
+		printf("c\n");
+		//if (certificate)
+		//	printf("c = \n%s\n", certificate);
+	}
+	
+	//memo: extension here(need to read and send alert if required.)
+
+	if (reader.is_failed()){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+	
+	if (work_buffer.data_size() != 0){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+
+    printf("cirtificate received\n");
+	work_buffer.consumed_all();
+	work_buffer.cleanup();
+	set_state(State::read_header, Sub_state::read_server_hello_done);
+}
+
+void Handshake_layer::process_server_hello_done(){
+    printf("server hello done processing\n");
+    if (state != State::process)
+        internal_error("State corrubted");
+	if (header.msg_type != Handshake_type::server_done)
+		internal_error("unexpected handshake type.");
+
+	if (work_buffer.data_size() != 0){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+
+    printf("server hello done\n");
+	work_buffer.cleanup();
+	set_state(State::process, Sub_state::write_client_key_exchange);
 }
 
 }//namespace ssl

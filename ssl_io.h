@@ -7,6 +7,8 @@ namespace ssl{
 
 //See section 5.2.1
 
+constexpr size_t initial_buffer_size = 1024*4;
+
 enum class Content_type: uint8_t{
     change_cipher_spec = 20,
     alert              = 21,
@@ -79,12 +81,14 @@ class Record_io_layer: public Io_layer{
     };
 
     Record_header record_header;
+	size_t remain_fragment_size;
     State state;
 
 	rcp::buffer<> work_buffer;
 	
 	bool read_record_header();
     size_t read_record(Content_type type, void* v, size_t s);
+    size_t read_record_fragment(void* v, size_t s);
 
     //Write on ssl
     //Write operation to ssl layer should succeed to write whole data,
@@ -95,10 +99,14 @@ class Record_io_layer: public Io_layer{
     size_t write_record(Content_type type, void* v, size_t s);
 
 	bool load(size_t size);
+	void set_state(State new_state);
 	void internal_error(const char* err_message);
 
 	//todo: remove fatal frag from args.
 	void alert(Alert_messages, bool fatal);
+	public:
+	Record_io_layer();
+	~Record_io_layer();
 };
 
 class Handshake_layer: public Record_io_layer{
@@ -110,9 +118,13 @@ class Handshake_layer: public Record_io_layer{
     };
 
     enum class Sub_state: uint8_t{
-        read_client_hello,
         write_client_hello,
         read_server_hello,
+		read_certificate,
+		read_server_hello_done,
+		write_client_key_exchange,
+
+        read_client_hello,
         write_server_hello,
         read_finished,
         write_finished,
@@ -139,13 +151,19 @@ class Handshake_layer: public Record_io_layer{
 	void start_server_handshake();
 	void start_client_handshake();
 	bool write_client_hello();
+	void process_server_hello();
+	void process_certificate();
 	void process_client_hello();
+	void process_server_hello_done();
 	bool read_handshake_header();
 	bool load_handshake_body();
     bool load_handshake(Handshake_type* type);
 
     void read_ready();
     void write_ready();
+	public:
+	Handshake_layer();
+	~Handshake_layer();
 };
 
 class Record_event_layer: public Handshake_layer{

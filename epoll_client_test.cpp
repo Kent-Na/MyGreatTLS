@@ -10,6 +10,9 @@
 uint16_t hton16(uint16_t val){
     return htons(val);
 }
+uint16_t ntoh16(uint16_t val){
+	return hton16(val);
+}
 uint32_t hton32(uint32_t val){
     return htonl(val);
 }
@@ -18,6 +21,7 @@ extern "C"{
 #include "../rcp_buffer/rcp_buffer.h"
 }
 #include "../rcp_buffer/rcp_buffer_cpp.h"
+#include "../rcp_buffer/rcp_buffer_reader.h"
 #include "interface.hpp"
 #include "socket_io.hpp"
 #include "ssl_io.cpp"
