@@ -31,7 +31,8 @@ env.Append(CCFLAGS = cflags)
 env.Append(CXXFLAGS = cflags)
 #env.Append(CXXFLAGS = ['-stdlib=libc++'])
 env.Append(CXXFLAGS = ['-std=c++11'])
-env.Append(LIBS = ['c++abi','c++'])
+env.Append(LIBS = ['c++abi', 'c++'])
+env.Append(LIBS = ['crypto', 'ssl'])
 
 Export('env')
 

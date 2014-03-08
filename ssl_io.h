@@ -1,9 +1,11 @@
-
+#include "openssl.cpp"
 
 //non_blocking ssl layer
 //
 
 namespace ssl{
+
+using namespace openssl;
 
 //See section 5.2.1
 
@@ -63,9 +65,12 @@ enum class Handshake_type: uint8_t{
 };
 
 class Record_event_layer;
+class Change_cipher_spec_layer;
 class Handshake_layer;
+
 class Record_io_layer: public Io_layer{
 	friend Record_event_layer;
+	friend Change_cipher_spec_layer;
 	friend Handshake_layer;
     enum class State: uint8_t{
         read_header,
@@ -83,6 +88,15 @@ class Record_io_layer: public Io_layer{
     Record_header record_header;
 	size_t remain_fragment_size;
     State state;
+	
+	//todo: dealt with wrap around.
+	uint64_t write_sequense_number;
+	uint8_t write_mac_key[32];
+	uint8_t write_encryption_key[32];
+	uint8_t write_encrypt;//temporal implementation
+	uint64_t read_sequense_number;
+	uint8_t read_mac_key[32];
+	uint8_t read_encryption_key[32];
 
 	rcp::buffer<> work_buffer;
 	
@@ -98,6 +112,9 @@ class Record_io_layer: public Io_layer{
     //Exseeded TLS record size rimit will never success.
     size_t write_record(Content_type type, void* v, size_t s);
 
+    size_t write_record_plane(Content_type type, void* v, size_t s);
+    size_t write_record_block_cipher(Content_type type, void* v, size_t s);
+
 	bool load(size_t size);
 	void set_state(State new_state);
 	void internal_error(const char* err_message);
@@ -109,7 +126,15 @@ class Record_io_layer: public Io_layer{
 	~Record_io_layer();
 };
 
-class Handshake_layer: public Record_io_layer{
+class Change_cipher_spec_layer: public Record_io_layer{
+	friend Handshake_layer;
+	void read_change_cipher_spec();
+	void write_change_cipher_spec();
+    void read_ready();
+    void write_ready();
+};
+
+class Handshake_layer: public Change_cipher_spec_layer{
 	friend Record_event_layer;
     enum class State{
         read_header,
@@ -123,6 +148,9 @@ class Handshake_layer: public Record_io_layer{
 		read_certificate,
 		read_server_hello_done,
 		write_client_key_exchange,
+		write_client_hello_done,
+		write_client_finished,
+		read_server_finished,
 
         read_client_hello,
         write_server_hello,
@@ -141,6 +169,11 @@ class Handshake_layer: public Record_io_layer{
     State state;
     Sub_state sub_state;
 	rcp::buffer<> work_buffer;
+	//First 32 bytes are client.random. Last 32 are server.random.
+	uint8_t client_server_random[64];
+	uint8_t master_secret[48];
+	SHA::State hash_handshake_messages;
+	RSA::Data* server_key;
 
 	void set_state(State s, Sub_state ss);
 	bool load(size_t s);
@@ -151,6 +184,8 @@ class Handshake_layer: public Record_io_layer{
 	void start_server_handshake();
 	void start_client_handshake();
 	bool write_client_hello();
+	bool write_client_key_exchange();
+	bool write_client_finished();
 	void process_server_hello();
 	void process_certificate();
 	void process_client_hello();

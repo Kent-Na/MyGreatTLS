@@ -16,6 +16,14 @@ uint16_t ntoh16(uint16_t val){
 uint32_t hton32(uint32_t val){
     return htonl(val);
 }
+uint64_t hton64(uint64_t val){
+	uint32_t *tmp_in = (uint32_t*)&val;
+	uint32_t tmp_out[2] = {
+		hton32(tmp_in[1]),
+		hton32(tmp_in[0]),
+	};
+    return *(uint64_t*)tmp_out;
+}
 
 extern "C"{
 #include "../rcp_buffer/rcp_buffer.h"
@@ -50,7 +58,7 @@ public:
         printf("read_ready\n");
         uint8_t buffer[1024];
         size_t r_val = stack->read((void*)buffer, 1024);
-        printf("%i, %s\n", r_val, buffer);
+        //printf("%i, %s\n", r_val, buffer);
         //auto s = io_stack->read(buffer.space(), buffer.space_size());
         //buffer.supplied(s);
     }
@@ -73,7 +81,7 @@ int main(int argc, char** argv){
     ///////////////
     //connect
     {
-		char* ip = "127.0.0.1";
+		const char* ip = "127.0.0.1";
         int r_val;
         struct sockaddr_in sockadd;
         bzero(&sockadd, sizeof sockadd);
