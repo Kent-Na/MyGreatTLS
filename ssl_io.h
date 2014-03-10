@@ -75,6 +75,7 @@ class Record_io_layer: public Io_layer{
     enum class State: uint8_t{
         read_header,
         read_fragment,
+		read_fragment_from_buffer
     };
 
 
@@ -97,12 +98,15 @@ class Record_io_layer: public Io_layer{
 	uint64_t read_sequense_number;
 	uint8_t read_mac_key[32];
 	uint8_t read_encryption_key[32];
+	uint8_t read_encrypt;//temporal implementation
 
 	rcp::buffer<> work_buffer;
 	
 	bool read_record_header();
     size_t read_record(Content_type type, void* v, size_t s);
     size_t read_record_fragment(void* v, size_t s);
+    size_t read_record_fragment_block_cipher(void* v, size_t s);
+    size_t read_record_fragment_bufferd(void* v, size_t s);
 
     //Write on ssl
     //Write operation to ssl layer should succeed to write whole data,
@@ -128,6 +132,7 @@ class Record_io_layer: public Io_layer{
 
 class Change_cipher_spec_layer: public Record_io_layer{
 	friend Handshake_layer;
+	friend Record_event_layer;
 	void read_change_cipher_spec();
 	void write_change_cipher_spec();
     void read_ready();

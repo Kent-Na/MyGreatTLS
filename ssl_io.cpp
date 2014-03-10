@@ -197,10 +197,24 @@ size_t Record_io_layer::read_record(Content_type type, void* d, size_t s){
 			if (not compleate) return total_result;
 		}
 		if (state == State::read_fragment){
-			if (record_header.content_type != type) return 0;
-			size_t result = 
-				read_record_fragment(
+			if (record_header.content_type != type) return total_result;
+			size_t result;
+			if (not read_encrypt){
+				result = read_record_fragment(
 						(void*)((uint8_t*)d+total_result), s-total_result);
+			}
+			else{
+				result = read_record_fragment_block_cipher(
+						(void*)((uint8_t*)d+total_result), s-total_result);
+			}
+			if (result==0) return total_result;
+			total_result+=result;
+		}
+		if (state == State::read_fragment_from_buffer){
+			if (record_header.content_type != type) return total_result;
+			size_t result;
+			result = read_record_fragment_bufferd(
+					(void*)((uint8_t*)d+total_result), s-total_result);
 			if (result==0) return total_result;
 			total_result+=result;
 		}
@@ -235,10 +249,95 @@ size_t Record_io_layer::read_record_fragment(void* d, size_t s){
 	if (remain_fragment_size <= supply_size)
 		supply_size = remain_fragment_size;
 	size_t result = low_level_io->read(d, supply_size);
-	remain_fragment_size -= supply_size;
+	remain_fragment_size -= result;
 	if (remain_fragment_size == 0)
 		set_state(State::read_header);
 	return result;
+}
+
+size_t Record_io_layer::read_record_fragment_block_cipher(void*d, size_t s){
+	//todo: setup work_buffer
+
+	if (work_buffer.space_size()>remain_fragment_size){
+		//print and suiside
+	}
+	size_t result = low_level_io->read(
+			work_buffer.space(), remain_fragment_size);
+	work_buffer.supplied(result);
+	remain_fragment_size -= result;
+
+	//Require full record to check MAC.
+	if (not (remain_fragment_size == 0)){
+		return 0;
+	}
+
+	//todo: Solve mac timing attack.
+	
+	rcp::buffer_reader<uint8_t> reader(&work_buffer);
+	constexpr size_t iv_size = 16;
+
+	if (record_header.length <= iv_size){
+		//fatal error
+		return 0;
+	}
+
+	uint8_t *iv = reader.take_byte_pointer<uint8_t>(iv_size, NULL);
+	size_t encrypted_size = record_header.length - iv_size;
+	uint8_t *encrypted = 
+		reader.take_byte_pointer<uint8_t>(encrypted_size, NULL);
+
+	//test all data are consumed or not
+
+	if (iv == NULL || encrypted == NULL){
+		//program should not leach here.
+		//fatal error
+		return 0;
+	}
+
+	uint8_t *decrypted = encrypted;
+	size_t decrypted_size = encrypted_size;
+	AES_KEY key;
+	AES_set_decrypt_key(read_encryption_key, 256, &key);
+	AES_cbc_encrypt(encrypted, decrypted,
+			encrypted_size, &key,
+			iv, 0);
+	
+	constexpr size_t mac_len = SHA::length;
+	uint8_t *fragment = decrypted;
+	uint8_t *padding_len = decrypted + decrypted_size -1;
+	uint8_t *padding = padding_len - *padding_len;
+	uint8_t *mac = padding-mac_len;
+	//todo: check mac
+
+	size_t fragment_len = mac-fragment;
+
+	if (s >= fragment_len){
+		memcpy(d, fragment, fragment_len);
+		set_state(State::read_header);
+		return fragment_len;
+	}
+	else{
+		memcpy(d, fragment, s);
+		work_buffer.cleanup();
+		//todo: it's not good implement.
+		work_buffer.supplied(fragment_len-s);
+		memmove(work_buffer.space(), fragment+s, fragment_len-s);
+		set_state(State::read_fragment_from_buffer);
+		return s;
+	}
+}
+size_t Record_io_layer::read_record_fragment_bufferd(void*d, size_t s){
+	size_t data_size = work_buffer.data_size();
+	if (data_size<s){
+		work_buffer.consume(d, data_size);
+		work_buffer.cleanup();
+		set_state(State::read_header);
+		return data_size;
+	}
+	else{
+		work_buffer.consume(d, s);
+		return s;
+	}
 }
 
 size_t Record_io_layer::write_record(
@@ -279,37 +378,21 @@ size_t Record_io_layer::write_record_plane(
 
 size_t Record_io_layer::write_record_block_cipher(
 		Content_type type, void* d, size_t s){
-	constexpr size_t iv_size = 16;
-	constexpr size_t mac_len = SHA::length;
-	//Plus one for length of padding length
-	const size_t fragment_base_len = s + mac_len + 1;
 
-	constexpr size_t block_size = 16; //must be 2^n
-	
-	//data length in last block;
-	const size_t last_data_len= (block_size - 1) & fragment_base_len;
-
-	const size_t min_padding_size = 
-		(block_size - last_data_len) % block_size;
-
-	// tatal_len must be less than 2^14+2048;
-	const size_t total_len  = 
-		fragment_base_len + min_padding_size + iv_size;
 	
 	if (not work_buffer.is_empty()){
 		internal_error("work_buffer isn't empty");
 		return 0;
 	}
 	work_buffer.cleanup();
-
 	//todo: test work_buffer.size() here.
-	work_buffer.supply(d, s);
 
+	//calculate MAC
+	constexpr size_t mac_len = SHA::length;
 	uint8_t mac[mac_len];
 	SHA_HMAC hash_state;
 	hash_state.init(write_mac_key, 32);
 
-	//this is not good way to do it...
 	uint8_t mac_header[13];
 	*(uint64_t*)(mac_header+0 ) = hton64(write_sequense_number);
 	*( uint8_t*)(mac_header+8 ) = (uint8_t)type;
@@ -321,33 +404,41 @@ size_t Record_io_layer::write_record_block_cipher(
 	hash_state.put_data((uint8_t*)d, s);
 	hash_state.generate(mac);
 
-	print_hex(mac, sizeof mac);
+	//Calculate padding size
+	//Plus one for length of padding length
+	const size_t fragment_base_len = s + mac_len + 1;
+	constexpr size_t block_size = 16; //must be 2^n
+	//data length in last block;
+	const size_t last_data_len= (block_size - 1) & fragment_base_len;
+	const size_t min_padding_size = 
+		(block_size - last_data_len) % block_size;
 
+	//Put data into work_buffer.
+	work_buffer.supply(d, s);
 	work_buffer.supply(mac, mac_len);
 	uint8_t *padding = work_buffer.supplied(min_padding_size+1);
 	for (int i= 0; i<min_padding_size+1; i++){
 		padding[i] = min_padding_size;
 	}
-
-	//print_hex(work_buffer.data(), work_buffer.data_size());
-
-	//encrypt
+	
+	//Generate iv
+	constexpr size_t iv_size = 16;
 	uint8_t iv_original[iv_size];
 	uint8_t iv[iv_size];
 	RNG::generate(NULL, iv_original, iv_size);
 	memcpy(iv, iv_original, iv_size);
 
-	//print_hex(iv, iv_size);
+	// tatal_len must be less than 2^14+2048;
+	const size_t total_len  = 
+		fragment_base_len + min_padding_size + iv_size;
+
+	//Encrypt
+	//todo: abstruct this.
 	AES_KEY key;
 	AES_set_encrypt_key(write_encryption_key, 256, &key);
-	//printf("len %02x\n", total_len);
-	//printf("len %02x\n", work_buffer.data_size());
 	AES_cbc_encrypt(work_buffer.data(), work_buffer.data(),
 			work_buffer.data_size(), &key,
 			iv, 1);
-	//print_hex(iv, iv_size);
-
-	//print_hex(work_buffer.data(), work_buffer.data_size());
 
 	//write_header
     uint8_t header[5];
@@ -366,23 +457,10 @@ size_t Record_io_layer::write_record_block_cipher(
     if (result != iv_size)
         internal_error("ssl_write_error");
 
-	//todo: Compless and encrypt here
     result = 
 		low_level_io->write(work_buffer.data(), work_buffer.data_size());
     if (result != work_buffer.data_size())
         internal_error("ssl_write_error");
-
-	//print_hex(header, 5);
-	//print_hex(iv, iv_size);
-	//print_hex(work_buffer.data(), work_buffer.data_size());
-
-	//AES_set_decrypt_key(write_encryption_key, 256, &key);
-	//AES_cbc_encrypt(work_buffer.data(), work_buffer.data(),
-			//work_buffer.data_size(), &key,
-			//iv, 0);
-	//print_hex(iv, iv_size);
-
-	//print_hex(work_buffer.data(), work_buffer.data_size());
 
 	work_buffer.consumed_all();
 	work_buffer.cleanup();
@@ -405,6 +483,10 @@ void Record_event_layer::proceed(){
         if (Record_io_layer::record_header.content_type == 
                                     Content_type::handshake){
             Handshake_layer::read_ready();
+        }
+        if (Record_io_layer::record_header.content_type == 
+                                    Content_type::change_cipher_spec){
+            Change_cipher_spec_layer::read_ready();
         }
     }
 }
@@ -443,8 +525,11 @@ void Change_cipher_spec_layer::read_change_cipher_spec(){
 	//todo: implement assert.
 	//assert(r_val != 1)
 
-	if (message != 1)return;//send alert here?
+	if (message != 1)return;//todo: send alert here?
 	//assert(message != 1);
+
+	read_encrypt = 1;
+	printf("r ccs\n");
 }
 void Change_cipher_spec_layer::write_change_cipher_spec(){
 	uint8_t message = 1;
@@ -825,6 +910,8 @@ void Handshake_layer::process_certificate(){
 		//BIO_free(out_bio);
 		//if (certificate)
 		//	printf("c = \n%s\n", certificate);
+
+		//todo:veryfi certificate
 	}
 	
 	//memo: extension here(need to read and send alert if required.)
