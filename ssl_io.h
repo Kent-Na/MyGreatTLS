@@ -177,8 +177,11 @@ class Handshake_layer: public Change_cipher_spec_layer{
 	//First 32 bytes are client.random. Last 32 are server.random.
 	uint8_t client_server_random[64];
 	uint8_t master_secret[48];
-	SHA::State hash_handshake_messages;
 	RSA::Data* server_key;
+
+	SHA::State hash_handshake_messages;
+	//contents expected in remote finished message
+	uint8_t remote_finished_verify[12];
 
 	void set_state(State s, Sub_state ss);
 	bool load(size_t s);
@@ -195,6 +198,7 @@ class Handshake_layer: public Change_cipher_spec_layer{
 	void process_certificate();
 	void process_client_hello();
 	void process_server_hello_done();
+	void process_server_finished();
 	bool read_handshake_header();
 	bool load_handshake_body();
     bool load_handshake(Handshake_type* type);

@@ -311,6 +311,9 @@ size_t Record_io_layer::read_record_fragment_block_cipher(void*d, size_t s){
 
 	size_t fragment_len = mac-fragment;
 
+	printf("received_rec:\n");
+	print_hex(fragment, fragment_len);
+
 	if (s >= fragment_len){
 		memcpy(d, fragment, fragment_len);
 		set_state(State::read_header);
@@ -318,17 +321,18 @@ size_t Record_io_layer::read_record_fragment_block_cipher(void*d, size_t s){
 	}
 	else{
 		memcpy(d, fragment, s);
-		work_buffer.cleanup();
 		//todo: it's not good implement.
-		work_buffer.supplied(fragment_len-s);
+		work_buffer.consumed_all();
+		work_buffer.cleanup();
 		memmove(work_buffer.space(), fragment+s, fragment_len-s);
+		work_buffer.supplied(fragment_len-s);
 		set_state(State::read_fragment_from_buffer);
 		return s;
 	}
 }
 size_t Record_io_layer::read_record_fragment_bufferd(void*d, size_t s){
 	size_t data_size = work_buffer.data_size();
-	if (data_size<s){
+	if (data_size<=s){
 		work_buffer.consume(d, data_size);
 		work_buffer.cleanup();
 		set_state(State::read_header);
@@ -594,6 +598,9 @@ void Handshake_layer::proceed(){
 			else if (sub_state == Sub_state::read_server_hello_done){
 				process_server_hello_done();
 			}
+			else if (sub_state == Sub_state::read_server_finished){
+				process_server_finished();
+			}
 			if (sub_state == Sub_state::write_client_key_exchange){
 				write_client_key_exchange();
 			}
@@ -804,27 +811,45 @@ bool Handshake_layer::write_client_finished(){
 
 	uint8_t *verify_data = out+4;
 
-	uint8_t h[SHA::length];
-	SHA::generate(&hash_handshake_messages, h);
-	static const char label[] = "client finished";
-	SHA_PRF(master_secret, 48,
-			(uint8_t*)label, 15,
-			h, SHA::length,
-			verify_data, 12);
-
-    size_t result = 
-		write_content(out, 4+12);
-	if (result != 0){
-		set_state(State::read_header, Sub_state::read_server_finished);
-		const char* dat = "hello world";
-		write_record_block_cipher(Content_type::application_data,
-				(void*)dat, strlen(dat));
-		return true;
+	{
+		print_hex(
+				(uint8_t*)&hash_handshake_messages, 
+				sizeof hash_handshake_messages);
+		uint8_t h[SHA::length];
+		SHA::State hash_state;
+		hash_state = hash_handshake_messages;
+		SHA::generate(&hash_state, h);
+		static const char label[] = "client finished";
+		SHA_PRF(master_secret, 48,
+				(uint8_t*)label, 15,
+				h, SHA::length,
+				verify_data, 12);
+		print_hex(verify_data, 12);
 	}
-	else{
+
+    size_t result = write_content(out, 4+12);
+
+	if (result == 0){
 		printf("client_finish fail");
 		return false;
 	}
+
+	set_state(State::read_header, Sub_state::read_server_finished);
+	{
+		uint8_t h[SHA::length];
+		SHA::generate(&hash_handshake_messages, h);
+		static const char label[] = "server finished";
+		SHA_PRF(master_secret, 48,
+				(uint8_t*)label, 15,
+				h, SHA::length,
+				remote_finished_verify, 12);
+	}
+
+	//Trigger read ready event here.
+	const char* dat = "hello world";
+	write_record_block_cipher(Content_type::application_data,
+			(void*)dat, strlen(dat));
+	return true;
 }
 
 void Handshake_layer::process_server_hello(){
@@ -947,6 +972,37 @@ void Handshake_layer::process_server_hello_done(){
     printf("server hello done\n");
 	work_buffer.cleanup();
 	set_state(State::process, Sub_state::write_client_key_exchange);
+}
+
+void Handshake_layer::process_server_finished(){
+    printf("server finished processing\n");
+    if (state != State::process)
+        internal_error("State corrubted");
+	if (header.msg_type != Handshake_type::finished)
+		internal_error("unexpected handshake type.");
+
+	rcp::buffer_reader<uint8_t> reader(&work_buffer);
+
+	//Protocol version
+    uint8_t *verify = reader.take_byte_pointer<uint8_t>(12, 0);
+
+	if (reader.is_failed()){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+	
+	if (work_buffer.data_size() != 0){
+        alert(Alert_messages::unexpected_message, true);
+        return;
+	}
+
+	//todo: compare and alert
+	print_hex(verify, 12);
+	print_hex(remote_finished_verify, 12);
+
+	work_buffer.consumed_all();
+	work_buffer.cleanup();
+	set_state(State::process, Sub_state::handshake_done);
 }
 
 }//namespace ssl
